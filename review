@@ -1,0 +1,1208 @@
+es倒排索引：
+关系数据库     ⇒ 数据库 ⇒ 表    ⇒ 行    ⇒ 列(Columns)
+
+Elasticsearch  ⇒ 索引(Index)   ⇒ 类型(type)  ⇒ 文档(Docments)  ⇒ 字段(Fields)  
+
+B-Tree 二叉树查找效率是logN，同时插入新的节点不必移动全部节点，所以用树型结构存储索引，能同时兼顾插入和查询的性能。因此在这个基础上，再结合磁盘的读取特性(顺序读/随机读)，传统关系型数据库采用了B-Tree/B+Tree这样的数据结构
+为了提高查询的效率，减少磁盘寻道次数，将多个值作为一个数组通过连续区间存放，一次寻道读取多个数据，同时也降低树的高度
+
+Name:
+
+| Term | Posting List |
+| -- |:----:|
+| Kate | 1 |
+| John | 2 |
+| Bill | 3 |
+Age:
+
+| Term | Posting List |
+| -- |:----:|
+| 24 | [1,2] |
+| 29 | 3 |
+Sex:
+
+| Term | Posting List |
+| -- |:----:|
+| Female | 1 |
+| Male | [2,3] |
+
+Posting List
+Elasticsearch分别为每个field都建立了一个倒排索引，Kate, John, 24, Female这些叫term，而[1,2]就是Posting List。Posting list就是一个int的数组，存储了所有符合某个term的文档id。
+通过posting list这种索引方式似乎可以很快进行查找，比如要找age=24的同学，爱回答问题的小明马上就举手回答：我知道，id是1，2的同学。但是，如果这里有上千万的记录呢？如果是想通过name来查找呢？
+
+Term Dictionary
+Elasticsearch为了能快速找到某个term，将所有的term排个序，二分法查找term，logN的查找效率，就像通过字典查找一样，这就是Term Dictionary。现在再看起来，似乎和传统数据库通过B-Tree的方式类似啊，为什么说比B-Tree的查询快呢？
+
+Term Index
+B-Tree通过减少磁盘寻道次数来提高查询性能，Elasticsearch也是采用同样的思路，直接通过内存查找term，不读磁盘，但是如果term太多，term dictionary也会很大，放内存不现实，于是有了Term Index，就像字典里的索引页一样，A开头的有哪些term，分别在哪页，可以理解term index是一颗树
+
+Elasticsearch里除了上面说到用FST压缩term index外，对posting list也有压缩技巧
+
+如果Elasticsearch需要对同学的性别进行索引(这时传统关系型数据库已经哭晕在厕所……)，会怎样？如果有上千万个同学，而世界上只有男/女这样两个性别，每个posting list都会有至少百万个文档id。 Elasticsearch是如何有效的对这些文档id压缩的呢？
+原理就是通过增量，将原来的大数变成小数仅存储增量值，再精打细算按bit排好队，最后通过字节存储，而不是大大咧咧的尽管是2也是用int(4个字节)来存储
+Roaring bitmaps
+说到Roaring bitmaps，就必须先从bitmap说起。Bitmap是一种数据结构，假设有某个posting list：
+
+[1,3,4,7,10]
+
+对应的bitmap就是：
+
+[1,0,1,1,0,0,1,0,0,1]
+
+非常直观，用0/1表示某个值是否存在，比如10这个值就对应第10位，对应的bit值是1，这样用一个字节就可以代表8个文档id，旧版本(5.0之前)的Lucene就是用这样的方式来压缩的，但这样的压缩方式仍然不够高效，如果有1亿个文档，那么需要12.5MB的存储空间，这仅仅是对应一个索引字段(我们往往会有很多个索引字段)。于是有人想出了Roaring bitmaps这样更高效的数据结构。
+
+Bitmap的缺点是存储空间随着文档个数线性增长，Roaring bitmaps需要打破这个魔咒就一定要用到某些指数特性：
+
+联合索引
+上面说了半天都是单field索引，如果多个field索引的联合查询，倒排索引如何满足快速查询的要求呢？
+
+利用跳表(Skip list)的数据结构快速做“与”运算，或者
+利用上面提到的bitset按位“与”
+先看看跳表的数据结构：
+
+所以，对于使用Elasticsearch进行索引时需要注意:
+
+不需要索引的字段，一定要明确定义出来，因为默认是自动建索引的
+同样的道理，对于String类型的字段，不需要analysis的也需要明确定义出来，因为默认也是会analysis的
+选择有规律的ID很重要，随机性太大的ID(比如java的UUID)不利于查询
+关于最后一点，个人认为有多个因素:
+
+其中一个(也许不是最重要的)因素: 上面看到的压缩算法，都是对Posting list里的大量ID进行压缩的，那如果ID是顺序的，或者是有公共前缀等具有一定规律性的ID，压缩比会比较高；
+
+另外一个因素: 可能是最影响查询性能的，应该是最后通过Posting list里的ID到磁盘中查找Document信息的那步，因为Elasticsearch是分Segment存储的，根据ID这个大范围的Term定位到Segment的效率直接影响了最后查询的性能，如果ID是有规律的，可以快速跳过不包含该ID的Segment，从而减少不必要的磁盘读次数，具体可以参考这篇如何选择一个高效的全局ID方案(评论也很精彩)
+
+
+
+SpringBoot自动配置原理
+
+其简化了spring的xml的配置，遵循了”约定大于配置“的原则，使用注解对常用的配置做默认配置，减少使用xml配置模式,SpringBoot为常用框架封装了大量的starter，比如spring-boot-starter-web会整合springmvc和内嵌的tomcat。SpringBoot在底层封装了默认的配置，修改配置在application.yml全局配置文件
+
+@SpringBootApplication：这个注解是整个SpringBoot项目的入口注解，是SpringBoot项目必不可少的注解。SpringBoot项目启动的时候加载的主配置类，主启动类
+
+@SpringBootApplication下三大核心注解:@SpringbootConfigration @EnableAutoConfigration @ComponentScan
+
+@SpringBootConfiguration：SpringBoot的配置类，将此注解标注在某个类上表示这个是一个SpringBoot的配置类
+
+@EnableAutoConfiguration：开启自动配置功能，工程中需要配置的东西,SpringBoot会帮我们自动配置；@EnableAutoConfiguration告诉SpringBoot开启自动配置功能。这样自动配置才会生效
+
+@ComponentScan：开启包的扫描功能，相当于spring中.xml配置中的<context:component-scan>,并没有指定basepackage，如果没有指定，spring底层会自动扫描当前配置类所在的包
+
+而在EnableAutoConfigration 里边有个重要的注解是@imports 通过导入AutoConfigurationImportSelector中的selectImports()方法。在方法getCandidateConfigurations中通过SpringFactoriesLoader.loadFactoryNames()扫描所有具有META-INF/spring.factories的jar包。 这个jar包中包含了所有需要自动配置的类。
+在spring.factory中有很多的xxxAutoConfuguration的自动配置的key，存储的形式是以key=value的形式添加到spring容器中。整个过程就是将类路径下"META-INF/spring.factories"里面配置的所有EnableAutoConfiguration的值加入到容器中。
+
+SpringBoot有一个注解@SpringBootApplication，是一个复合或者派生注解。当SpringBoot调用run方法的时候，SpringBoot会通过@EnableAutoConfiguration注解找到方法getCandidateConfigurations找到所有需要自动配置类的集合，以List集合返回，自动配置类存储在META-INF/spring.factories配置文件中，文件中以AutoConfiguration命名结尾的向spring容器中添加组件，通过以Properties结尾命名的类中取得在全局配置文件中配置的属性。XxxxProperties和@ConfigurationProperties注解与全局配置文件中对应的属性进行绑定，所以我们在项目中全局配置文件application.yml中可以修改server.port :8081等等。
+
+
+---- SpringBoot-starter 的作用
+
+引入模块所需的相关jar包
+自动配置各自模块所需的属性
+
+可见，使用SpringBoot-starter来搭建web工程相当方便，不像以前搭建SSM，需要将那么多jar包依赖逐个加入到Maven工程，还需考虑jar包之间的版本兼容性等
+
+在springBoot启动的时候添加一段代码
+Spring Boot Runner启动器：
+如果你想在SpringBoot启动的时候运行一些特定的代码，你可以实现接口ApplicationRunner或者CommandLineRunner，这两个接口实现方式一样，它们都只提供了一个run方法。
+
+如何使用 Spring Boot 实现异常处理？
+spring 提供一种 ControllerAdvice处理异常的方法,实现ControllerAdvice来处理控制器抛出的所有异常
+
+什么是 FreeMarker 模板
+FreeMarker静态模板，在页面数据基本不变的情况下，可以使用静态模板加载
+
+
+如果重新加载springboot上的更改,而无需重启服务器
+springboot有一个开发工具(devTools)模块,开发人员可以重新加载springboot上的更改而无需重启服务器
+
+
+springboot 常用的start有哪些?
+spring-boot-starter-test：单元测试
+spring-boot-starter-data-redis: resdis
+spring-boot-starter-web: 集成springMVC
+spring-boot-starter-aop：集成切面编程
+spring-boot-starter-jdbc: 集成数据库连接
+spring-security-core: 核心组件
+spring-beans
+
+
+----- Springboot的 配置文件
+用过 Spring Boot 的都知道在 Spring Boot 中有以下两种配置文件
+bootstrap (.yml 或者 .properties)
+application (.yml 或者 .properties)
+
+Spring Cloud 构建于 Spring Boot 之上，在 Spring Boot 中有两种上下文，一种是 bootstrap, 另外一种是 application, bootstrap 是应用程序的父上下文，也就是说 bootstrap 加载优先于 applicaton。bootstrap 主要用于从额外的资源来加载配置信息，还可以在本地外部配置文件中解密属性。这两个上下文共用一个环境，它是任何Spring应用程序的外部属性的来源。bootstrap 里面的属性会优先加载，它们默认也不能被本地相同配置覆盖。
+
+因此，对比 application 配置文件，bootstrap 配置文件具有以下几个特性:boostrap由父 ApplicationContext 加载，比 applicaton 优先加载
+boostrap 里面的属性不能被覆盖
+
+bootstrap 配置文件有以下几个应用场景：
+使用 Spring Cloud Config 配置中心时，这时需要在 bootstrap 配置文件中添加连接到配置中心的配置属性来加载外部配置中心的配置信息；
+一些固定的不能被覆盖的属性；一些加密/解密的场景；
+
+----- java四大特性
+java四大特性：封装,继承,多态,抽象
+
+封装：封装内部的特有属性和动作，提供set,get方法与外界联系,当内部发生变化时,外部调用不用因此而修改，它们只调用开放的接口，而不用去关心内部的实现
+实现了专业的分工，将处理逻辑封装成一个方法，做到见名知其义,良好的封装能够减少耦合,隐藏信息,实现细节
+
+继承：是面向对象的最显著的一个特征。继承是从已有的类（父类或者超类）中派生出新的类（子类），新的类能吸收已有类的数据属性和行为，并能扩展新的能力（方法的覆盖/重写）
+父类是子类的一般化，子类是父类的特殊化（具体化)，当父类无法满足现有需求时，可以通过继承进行扩展，重写父类方法达到自身需求
+
+子类的特点:子类拥有父类非private的属性和方法,子类可以添加自己的方法和属性，即对父类进行扩展,子类可以重新定义父类的方法，即方法的覆盖/重写
+
+多态：多态是面向对象的重要特性,一个接口的多种实现,就是同一种事物表现出的多种形态，
+
+多态的三种实现方式：通过子类对父类方法的覆盖来实现多态 通过一个类中方法的重载来实现多态 通过将子类的对象作为父类的对象实现多态。
+
+抽象(abstract )：在分析事物时，会发现事物的共性，将共性抽取出，实现的时候，方法功能声明相同，但方法功能主体不同，将方法声明抽取出，此方法就是一个抽象方法。
+
+抽象的特点:抽象类和抽象方法都需要被 abstract 修饰，抽象方法一定要定义在抽象类中,抽象不能直接创建对象，因为调用抽象方法没有意义,只有覆盖了抽象类中所有的抽象方法后，其子类才可以创建对象，否则该子类还是一个抽象类
+
+---- 重写与重载的区别：
+重写：
+1.发生在父类与子类之间 2.方法名，参数列表，返回类型（除过子类中方法的返回类型是父类中返回类型的子类）必须相同
+3.访问修饰符的限制一定要大于被重写方法的访问修饰符（public>protected>default>private)
+4.重写方法一定不能抛出新的检查异常或者比被重写方法申明更加宽泛的检查型异常
+重载:
+重载Overload是一个类中多态性的一种表现
+2.重载要求同名方法的参数列表不同(参数类型，参数个数甚至是参数顺序)
+3.重载的时候，返回值类型可以相同也可以不相同。无法以返回型别作为重载函数的区分标准
+
+两者都是多态的体现方式
+
+
+------ java八大数据类型
+java八大数据类型: byte 1 char 1  short 2  int 4 long 8  float 4 double 8  boolean 1 
+包装类:Integer Long Boolean Double Byte Character  Float Short
+
+
+---- equals 和 == 区别
+==
+有个常量池的概念，如果字符串小于
+
+如果比较的是基本数据类型变量，比较两个变量的值是否相等。(不一定数据类型相同)如果比较的是引用数据类型变量，比较两个对象的地址值是否相同，即两个引用是否指向同一个地址值,布尔类型不能参与运算符==比较
+equals
+重写的后,如果地址不同，根据字符串长度比较,如果比较完相同，则返回true,
+
+HashCode作用：建议equals 和 hashCode 一块重写，保持相同的hashCode值
+HashCode的存在主要是为了查找的快捷性，HashCode是用来在散列存储结构中确定对象的存储地址的(后半句说的用hashcode来代表对象就是在hash表中的位置
+
+----- String,StringBuffer,StringBuilder的区别
+String 类型和StringBuffer的主要性能区别：String是不可变的对象, 因此在每次对String 类型进行改变的时候，都会生成一个新的 String 对象，然后将指针指向新的 String 对象，所以经常改变内容的字符串最好不要用 String ，因为每次生成对象都会对系统性能产生影响，特别当内存中无引用对象多了以后， JVM 的 GC 就会开始工作，性能就会降低。
+
+使用 StringBuffer 类时，每次都会对 StringBuffer 对象本身进行操作，而不是生成新的对象并改变对象引用。所以多数情况下推荐使用 StringBuffer ，特别是字符串对象经常改变的情况下，同时
+
+
+StringBuffer单线程下StringBuffer加了synchronized,所以线程安全,但是synchronized获取锁和释放锁也还是需要时间的,所以相对于的性能更慢一些,
+
+StringBuilder没有加任何锁，其效率高，适用单线程场景，但同时也适用于高并发场景中，提高高并发场景下程序的响应性能，两者都是可变的，至于线程安全问题可以通过其它手段解决，如ThreadLocal，CAS操作等
+
+
+
+---- 泛型概念
+这种参数类型可以用在类、接口和方法中，分别被称为泛型类、泛型接口、泛型方法。顾名思义，就是将类型由原来的具体的类型参数化，类似于方法中的变量参数，此时类型也定义成参数形式
+
+
+----- 线程的生命周期
+线程的生命周期存在5个状态
+
+新建状态（New）：至今尚未启动的线程的状态。线程刚被创建，但尚未启动。如：Thread t = new MyThread();
+
+就绪状态（Runnable）：当调用线程对象的start()方法（t.start();），线程即进入就绪状态。处于就绪状态的线程，只是说明此线程已经做好了准备，随时等待CPU调度执行，并不是说执行了t.start()此线程立即就会执行；
+
+运行状态（Running）：当CPU开始调度处于就绪状态的线程时，此时线程才得以真正执行，即进入到运行状态。注：就 绪状态是进入到运行状态的唯一入口，也就是说，线程要想进入运行状态执行，首先必须处于就绪状态中；
+
+阻塞状态（Blocked）：处于运行状态中的线程由于某种原因，暂时放弃对CPU的使用权，停止执行，此时进入阻塞状态，直到其进入到就绪状态，才有机会再次被CPU调用以进入到运行状态。根据阻塞产生的原因不同，阻塞状态又可以分为三种：
+
+等待阻塞—位于对象等待池中的阻塞状态（Blocked）：当线程处于运行状态时，如果执行了某个对象的wait()方法，Java虚拟机就会把线程放到这个对象的等待池中，这涉及到“线程通信”的内容。
+
+同步阻塞 --位于对象锁池中的阻塞状态（Blocked in object’s lock pool）：当线程处于运行状态时，试图获得某个对象的同步锁时，如果该对象的同步锁已经被其他线程占用，Java虚拟机就会把这个线程放到这个对象的锁池中，这涉及到“线程同步”的内容。【线程在获取synchronized同步锁失败(因为锁被其它线程所占用)】
+
+其他阻塞状态（Otherwise Blocked）：当前线程执行了sleep()方法，或者调用了其他线程的join()方法，或者发出了I/O请求时，就会进入这个状态。线程会进入到阻塞状态。当sleep()状态超时、join()等待线程终止或者超时、或者I/O处理完毕时，线程重新转入就绪状态。
+
+死亡状态（Dead）：线程执行完了或者因异常退出了run()方法，该线程结束生命周期
+
+
+----- synchronized 原理以及锁升级过程（级别从低到高） 
+
+Synchronized使用场景：
+1锁当前实例对象：锁对象当前实例对象
+2修饰静态同步方法：锁对象是当前的类Class对象
+3修饰同步代码块：锁对象是Synchronized后面括号里配置的对象，这个对象可以是某个对象（xlock），也可以是某个类（Xlock.class）
+
+实现原理：已知对象是存放在堆内存中的，对象大致可以分为三个部分，分别是对象头、实例变量和填充字节
+
+对象头的主要是由MarkWord和KlassPoint类型指针组成，其中KlassPoint是是对象指向它的类元数据的指针，虚拟机通过这个指针来确定这个对象是哪个类的实例，Mark Word用于存储对象自身的运行时数据,
+实例变量存储的是对象的属性信息，包括父类的属性信息，按照4字节对齐,填充字符，
+因为虚拟机要求对象字节必须是8字节的整数倍，填充字符就是用于凑齐这个整数倍的
+
+Synchronized锁存在于对象头的MarkWord中 锁标志位主要分为锁升级的六大状态
+
+重量级锁对应的锁标志位是10，存储了指向重量级监视器锁的指针，在Hotspot中，对象的监视器（monitor）锁对象由ObjectMonitor对象
+
+ObjectMonitor() {
+    _count        = 0; //用来记录该对象被线程获取锁的次数
+    _waiters      = 0;
+    _recursions   = 0; //锁的重入次数
+    _owner        = NULL; //指向持有ObjectMonitor对象的线程 
+    _WaitSet      = NULL; //处于wait状态的线程，会被加入到_WaitSet
+    _WaitSetLock  = 0 ;
+    _EntryList    = NULL ; //处于等待锁block状态的线程，会被加入到该列表
+}
+
+
+对于一个synchronized修饰的方法(代码块)实现原理：
+
+当多个线程同时访问该方法,那么这些线程会先被放进_EntryList队列，此时线程处于blocking状态,当一个线程获取到了实例对象的监视器（monitor）锁,那么就可以进入running状态,执行方法,此时,ObjectMonitor对象的_owner指向当前线程,_count加1表示当前对象锁被一个线程获取,当running状态的线程调用wait()方法，那么当前线程释放monitor对象，进入waiting状态，ObjectMonitor对象的_owner变为null,_count减1,同时线程进入_WaitSet队列,直到有线程调用notify()方法唤醒该线程,则该线程重新获取monitor对象进入_Owner区
+如果当前线程执行完毕，那么也释放monitor对象，进入waiting状态，ObjectMonitor对象的_owner变为null，_count减1
+
+Synchronized修饰代码块：
+Synchronized代码块同步在需要同步的代码块开始的位置插入monitorentry指令，在同步结束的位置或者异常出现的位置插入monitorexit指令；JVM要保证monitorentry和monitorexit都是成对出现的，任何对象都有一个monitor与之对应，当这个对象的monitor被持有以后，它将处于锁定状态。
+
+
+Synchronized修饰方法：
+Synchronized方法同步不再是通过插入monitorentry和monitorexit指令实现，而是由方法调用指令来读取运行时常量池中的ACC_SYNCHRONIZED标志隐式实现的，如果方法表结构（method_info Structure）中的ACC_SYNCHRONIZED标志被设置，那么线程在执行方法前会先去获取对象的monitor对象，如果获取成功则执行方法代码，执行完毕后释放monitor对象，如果monitor对象已经被其它线程获取，那么当前线程被阻塞
+
+
+----- Synchronized的锁升级过程
+
+无锁状态--> 偏向锁状态 --> 轻量级锁状态-->重量级锁状态
+偏向锁：偏向锁是指一段同步代码一直被一个线程所访问，那么该线程会自动获取锁。降低获取锁的代价。
+为什么要引入偏向锁？
+因为大多数时候是不存在锁竞争的，常常是一个线程多次获得同一个锁，因此如果每次都要竞争锁会增大很多没有必要付出的代价，为了降低获取锁的代价，才引入的偏向锁。
+
+
+偏向锁的升级
+
+当线程1访问代码块并获取锁对象时，会在java对象头和栈帧中记录偏向锁的threadID，因为偏向锁不会主动释放锁，因此以后线程1再次获取锁的时候，需要比较当前线程的threadID和Java对象头中的threadID是否一致，如果一致（还是线程1获取锁对象），则无需使用CAS自旋锁来加锁、解锁；如果不一致（其他线程，如线程2要竞争锁对象，而偏向锁不会主动释放因此还是存储的线程1的threadID），那么需要查看Java对象头中记录的线程1是否存活，如果没有存活，那么锁对象被重置为无锁状态，其它线程（线程2）可以竞争将其设置为偏向锁；如果存活，那么立刻查找该线程（线程1）的栈帧信息，如果还是需要继续持有这个锁对象，那么暂停当前线程1，撤销偏向锁，升级为轻量级锁，如果线程1 不再使用该锁对象，那么将锁对象状态设为无锁状态，重新偏向新的线程。
+
+偏向锁的取消：偏向锁是默认开启的，而且开始时间一般是比应用程序启动慢几秒，如果不想有这个延迟，那么可以使用-XX:BiasedLockingStartUpDelay=0；
+
+轻量级锁: 轻量级锁是指当锁是偏向锁的时候，被另一个线程所访问，偏向锁就会升级为轻量级锁，其他线程会通过自旋的形式尝试获取锁，不会阻塞，提高性能
+
+为什么要引入轻量级锁？
+轻量级锁考虑的是竞争锁对象的线程不多，而且线程持有锁的时间也不长的情景。因为阻塞线程需要CPU从用户态转到内核态，代价较大，如果刚刚阻塞不久这个锁就被释放了，那这个代价就有点得不偿失了，因此这个时候就干脆不阻塞这个线程，让它自旋这等待锁释放。
+
+3.自旋锁
+自旋锁原理非常简单，如果持有锁的线程能在很短时间内释放锁资源，那么那些等待竞争锁的线程就不需要做内核态和用户态之间的切换进入阻塞挂起状态，它们只需要等一等（自旋），等持有锁的线程释放锁后即可立即获取锁，这样就避免用户线程和内核的切换的消耗。
+
+
+重量级锁
+
+重量级锁是指当锁为轻量级锁的时候，另一个线程虽然是自旋，但自旋不会一直持续下去，当自旋一定次数的时候，还没有获取到锁，就会进入阻塞，该锁膨胀为重量级锁。重量级锁会让其他申请的线程进入阻塞，性能降低。
+
+轻量级锁什么时候升级为重量级锁？
+
+线程1获取轻量级锁时会先把锁对象的对象头MarkWord复制一份到线程1的栈帧中创建的用于存储锁记录的空间（称为DisplacedMarkWord），然后使用CAS把对象头中的内容替换为线程1存储的锁记录（DisplacedMarkWord）的地址；
+
+如果在线程1复制对象头的同时（在线程1CAS之前），线程2也准备获取锁，复制了对象头到线程2的锁记录空间中，但是在线程2CAS的时候，发现线程1已经把对象头换了，线程2的CAS失败，那么线程2就尝试使用自旋锁来等待线程1释放锁。
+
+但是如果自旋的时间太长也不行，因为自旋是要消耗CPU的，因此自旋的次数是有限制的，比如10次或者100次，如果自旋次数到了线程1还没有释放锁，或者线程1还在执行，线程2还在自旋等待，这时又有一个线程3过来竞争这个锁对象，那么这个时候轻量级锁就会膨胀为重量级锁。重量级锁把除了拥有锁的线程都阻塞，防止CPU空转。
+
+*注意：为了避免无用的自旋，轻量级锁一旦膨胀为重量级锁就不会再降级为轻量级锁了；偏向锁升级为轻量级锁也不能再降级为偏向锁。一句话就是锁可以升级不可以降级，但是偏向锁状态可以被重置为无锁状态。
+
+
+----Java创建对象的四种方式
+1.直接new出一个对象
+2.通过反射,使用getNewInstance()创建 
+3.利用反序列化创建对象
+
+---- 为什么要进行序列化?
+再介绍之前，我们有必要先了解下对象的生命周期，我们知道Java中的对象都是存在于堆内存中的，而堆内存是可以被垃圾回收器不定期回收的。从对象被创建到被回收这一段时间就是Java对象的生命周期，也即Java对象只存活于这个时间段内。
+
+对象被垃圾回收器回收意味着对象和对象中的成员变量所占的内存也就被回收，这意味着我们就再也得不到该对象的任何内容了，因为已经被销毁，当然我们可以再重新创建，但这时的对象的各种属性都又被重新初始化了。所以如果我们需要保存某对象的状态，则必须要在对象被销毁即被垃圾回收器回收之前保存对象的状态,就可以把对象序列化
+
+
+---- 深拷贝和浅拷贝
+
+浅拷贝：拷贝clone后的引用属于栈区引用，拷贝后与原对象的各项属性的值一致，如果原对象和拷贝对象一个引用对象属性,这个引用对象数据属于堆空间，这个时候拷贝对象和原对象指向的都是同一个内存,引用对象如果发生改变，那么拷贝对象和原对象的值都会发生更改
+
+深拷贝：深拷贝是一个整个独立的对象拷贝，深拷贝会拷贝所有的属性,并拷贝属性指向的动态分配的内存。当对象和它所引用的对象一起拷贝时即发生深拷贝。深拷贝相比于浅拷贝速度较慢并且花销较大,拷贝对象和原对象都引用了同一个对象属性，那么在引用对象属性在完成引用后，在发生改变,这个时候重新set引用对象会发现，会重新在堆里边生成一份内存存储引用对象2,这个时候改变拷贝引用对象是不会影响原引用对象的
+
+----final关键字用法：
+用来修饰数据，包括成员变量和局部变量，该变量只能被赋值一次且它的值无法被改变。用来修饰方法参数，表示在变量的生存期中它的值不能被改变；修饰方法，表示该方法无法被重写；修饰类，表示该类无法被继承。
+
+----- static 
+可以用于静态代码块，初始化对象的初始属性，静态代码块只会执行一次，且初始化一次static修饰的代码块 
+static关键字可以修饰成员变量和方法，来让它们变成类的所属，而不是对象的所属,意思就是初始化两个相同的对象，如果定义了一个static定义的成员变量，那么对象改变static属性时，全局发生改变
+修饰成员方法,相比于修饰成员属性，修饰成员方法对于数据的存储上面并没有多大的变化，方法本来就是存放在类的定义当中的,static修饰成员方法最大的作用，就是可以使用"类名.方法名"的方式操作方法，避免了先要new出对象的繁琐和资源消耗
+
+
+---- Exception 和 Error
+首先两者都是继承自 Throwable类 
+Error一般来说是程序无法处理的异常,例如内存泄漏,虚拟机错误,线程死锁等系统异常
+Exception：可分为运行时异常和编译时异常,其中运行中异常主要继承在 RuntimeException,此类异常一般是程序中产生的异常，例如：空指针,类型转换异常,算数异常
+如果有业务异常可以进行自定义异常,通常可以设置异常的全局捕捉  @ControllerAdvice作异常捕捉返回自定义异常
+
+Spring 统一异常处理有 3 种方式，分别为：1.使用@ExceptionHandler 注解,2.HandlerExceptionResolver 接口 3.使用 @controlleradvice 注解
+
+
+
+
+
+---- OOM  OutOfMemorryError 内存超出问题
+
+最常见的OOM情况有以下三种 以及SOF StackOverflow：
+
+java.lang.OutOfMemoryError: Java heap space------>java堆内存溢出，此种情况最常见，一般由于内存泄露或者堆的大小设置不当引起。对于内存泄露，需要通过内存监控软件查找程序中的泄露代码，而堆大小可以通过虚拟机参数-Xms,-Xmx等修改。
+java.lang.OutOfMemoryError: PermGen space ------>java永久代溢出，即方法区溢出了，一般出现于大量Class或者jsp页面，或者采用cglib等反射机制的情况，因为上述情况会产生大量的Class信息存储于方法区。此种情况可以通过更改方法区的大小来解决，使用类似-XX:PermSize=64m -XX:MaxPermSize=256m的形式修改。另外，过多的常量尤其是字符串也会导致方法区溢出。
+java.lang.StackOverflowError ------> 不会抛OOM error，但也是比较常见的Java内存溢出。JAVA虚拟机栈溢出，一般是由于程序中存在死循环或者深度递归调用造成的，栈大小设置太小也会出现此种溢出。可以通过虚拟机参数-Xss来设置栈的大小。
+
+SOF：StackOverflow（堆栈溢出）
+当应用程序递归太深而发生堆栈溢出时，抛出该错误。因为栈一般默认为1-2m，一旦出现死循环或者是大量的递归调用，在不断的压栈过程中，造成栈容量超过1m而导致溢出。
+栈溢出的原因：递归调用,大量循环或死循环,全局变量是否过多,数组、List、Map数据过大
+
+程序,进程,线程
+简而言之,一个程序至少有一个进程,一个进程至少有一个线程
+
+
+---- ngnix
+nginx简介:
+Nginx 是高性能的 HTTP 和反向代理的web服务器，处理高并发能力是十分强大的，能经受高负 载的考验,有报告表明能支持高达 50,000 个并发连接数。
+其特点是占有内存少，并发能力强
+
+正向代理:
+Nginx 不仅可以做反向代理，实现负载均衡。还能用作正向代理来进行上网等功能。 正向代理：如果把局域网外的 Internet 想象成一个巨大的资源库，则局域网中的客户端要访 问 Internet，则需要通过代理服务器来访问，这种代理服务就称为正向代理。
+
+简单一点：通过代理服务器来访问服务器的过程 就叫 正向代理。
+需要在客户端配置代理服务器进行指定网站访问
+
+反向代理：其实客户端对代理是无感知的，因为客户端不需要任何配置就可以访问,只需要将请求发送到反向代理服务器，由反向代理服务器去选择目标服务器获取数据后，在返 回给客户端，此时反向代理服务器和目标服务器对外就是一个服务器，暴露的是代理服务器地址,隐藏了真实服务器 IP 地址。
+
+负载均衡:
+增加服务器的数量，然后将请求分发到各个服务器上，将原先请求集中到单个服务器上的 情况改为将请求分发到多个服务器上，将负载分发到不同的服务器，也就是我们所说的负 载均衡,客户端发送多个请求到服务器，服务器处理请求，有一些可能要与数据库进行交互，服务器处理完毕后，再将结果返回给客户端
+
+6.动静分离
+为了加快网站的解析速度，可以把动态页面和静态页面由不同的服务器来解析，加快解析速 度。降低原来单个服务器的压力
+
+配置
+
+worker_processes  1;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile        on;
+    keepalive_timeout  65;
+
+    server {
+        listen       80;
+        server_name  localhost;
+
+        location / {
+            root   html;
+            index  index.html index.htm;
+        }
+        error_page   500 502 503 504  /50x.html;
+        location = /50x.html {
+            root   html;
+        }
+    }
+}
+
+第一部分：全局块
+worker_processes  1;
+这是 Nginx 服务器并发处理服务的关键配置，worker_processes 值越大，可以支持的并发处理量也越多，但是 会受到硬件、软件等设备的制约
+第二部分：events块
+events {
+    worker_connections  1024;
+}
+events 块涉及的指令主要影响 Nginx 服务器与用户的网络连接，常用的设置包括是否开启对多 work process 下的网络连接进行序列化，是否 允许同时接收多个网络连接，选取哪种事件驱动模型来处理连接请求，每个 word process 可以同时支持的最大连接数等,上述例子就表示每个 work process 支持的最大连接数为 1024.这部分的配置对 Nginx 的性能影响较大，在实际中应该灵活配置。
+
+    upstream myserver {
+        server 208.208.128.122:8081;
+        server 208.208.128.122:8082;
+    }
+    server {
+        listen       80;
+        server_name  208.208.128.122;
+
+        #charset koi8-r;
+
+        #access_log  logs/host.access.log  main;
+
+        location / {
+            root   html;
+            proxy_pass   http://myserver;
+            #proxy_pass   http://127.0.0.1:8081;
+            index  index.html index.htm;
+    }
+
+
+------ nginx 分配服务器策略
+
+a. 轮询（默认）
+b. weight： server 208.208.128.122:8081 weight=10;   #  在这儿
+
+正向代理与反向代理的区别：正向代理相对于目标服务器而言隐藏了客户端的真实IP地址，因为对于目标服务器而言所有请求都是从正向代理服务器发出的，正向代理主要是为了突破网络访问限制，比如科学上网，还有就是隐藏客户端IP地址。反向代理对于客户端而言隐藏了目标服务器IP地址，只需要知道代理服务器地址就能访问到目标服务器的资源。其主功能是可以做负载均衡和安全防护。不过，不管正向代理还是反向代理，都能加快客户端的访问速度，因为nginx服务器是一个高性能的http web服务器，其能够对代理中的数据作缓冲
+
+Nginx 的原理：
+1. mater 和 worker
+nginx 启动后，是由两个进程组成的。master（管理者）和worker（工作者）,一个nginx 只有一个master。但可以有多个worker
+过来的请求由master管理，worker进行争抢式的方式去获取请求。
+
+2. master-workers 的机制的好处
+对于每个worker进程来说，独立的进程，不需要加锁，所以省掉了锁带来的开销，采用独立的进程，可以让互相之间不会影响，一个进程退出后其它进程还在工作服务不会中断，master进程则很快启动新的worker进程。当然，worker进程的异常退出，肯定是程序有bug了，异常退出，会导致当前worker上的所有请求失败，不过不会影响到所有请求，所以降低了风险
+3. 设置多少个 worker
+Nginx 同 redis 类似都采用了 io 多路复用机制，每个 worker 都是一个独立的进程，但每个进 程里只有一个主线程，通过异步非阻塞的方式来处理请求， 即使是千上万个请求也不在话 下。每个 worker 的线程可以把一个 cpu 的性能发挥到极致。所以 worker 数和服务器的 cpu 数相等是最为适宜的。设少了会浪费 cpu，设多了会造成 cpu 频繁切换上下文带来的损耗
+
+----- Redis：
+Redis快的原因:
+1.Redis采用的是基于内存的采用的是单进程单线程模型的 KV 数据库,完全基于内存，绝大部分请求是纯粹的内存操作，非常快速,数据存在内存中
+2.数据结构简单，对数据操作也简单
+3.采用单线程，避免了不必要的上下文切换和竞争条件，也不存在多进程或者多线程导致的切换而消耗CPU，不用去考虑各种锁的问题，不存在加锁释放锁操作，没有因为可能出现死锁而导致的性能消耗
+4.使用多路I/O复用模型，非阻塞IO；
+
+集群部署:
+集群的部署方式也就是Redis cluster，并且是主从同步读写分离，类似Mysql的主从同步，Redis cluster 支撑 N 个 Redis master node，每个master node都可以挂载多个 slave node。
+这样整个 Redis 就可以横向扩容了。如果你要支撑更大数据量的缓存，那就横向扩容更多的 master 节点，每个 master节点就能存放更多的数据了。
+
+
+集群部署,主从同步是如何进行同步的:
+你启动一台slave 的时候，他会发送一个psync命令给master ，如果是这个slave第一次连接到master，他会触发一个全量复制。master就会启动一个线程，生成RDB快照，还会把新的写请求都缓存在内存中，RDB文件生成后，master会将这个RDB发送给slave的，slave拿到之后做的第一件事情就是写进本地的磁盘，然后加载进内存，然后master会把内存里面缓存的那些新命名都发给slave
+
+----- 数据传输的时候断网了或者服务器挂了怎么办啊？
+传输过程中有什么网络问题啥的，会自动重连的，并且连接之后会把缺少的数据补上的。
+
+----- resdis内存淘汰机制:
+noeviction:返回错误当内存限制达到并且客户端尝试执行会让更多内存被使用的命令（大部分的写入指令，但DEL和几个例外）
+allkeys-lru: 尝试回收最少使用的键（LRU），使得新添加的数据有空间存放。
+volatile-lru: 尝试回收最少使用的键（LRU），但仅限于在过期集合的键,使得新添加的数据有空间存放。
+allkeys-random: 回收随机的键使得新添加的数据有空间存放。
+volatile-random: 回收随机的键使得新添加的数据有空间存放，但仅限于在过期集合的键。
+volatile-ttl: 回收在过期集合的键，并且优先回收存活时间（TTL）较短的键,使得新添加的数据有空间存放。如果没有键满足回收的前提条件的话，策略volatile-lru, volatile-random以及volatile-ttl就和noeviction 差不多了
+
+------ 为什么是单线程：
+不需要各种锁的性能消耗
+单线程多进程集群方案
+单线程的威力实际上非常强大，每核心效率也非常高，多线程自然是可以比单线程有更高的性能上限，但是在今天的计算环境中，即使是单机多线程的上限也往往不能满足需要了
+CPU消耗
+采用单线程，避免了不必要的上下文切换和竞争条件，也不存在多进程或者多线程导致的切换而消耗 CPU
+
+------ Redis原子性原理
+摘要：Redis是单进程单线程的网络模型，用的是epoll网络模型，网络模型都是单线程异步非阻塞处理网络请求
+Redis的单线程处理所有的客户端连接请求，命令读写请求。（有些任务比如rdb和aof等操作是fork子进程处理的，不会影响redis主线程处理客户端的命令）
+Redis提供的所有API操作，相对于服务端方面都是one by one执行的，命令是一个接着一个执行的，不存在并行执行的情况。
+
+
+----- Redis持久化RDB和AOF
+为什么需要持久化？
+Redis对数据的操作都是基于内存的，当遇到了进程退出、服务器宕机等意外情况，如果没有持久化机制，那么Redis中的数据将会丢失无法恢复。有了持久化机制，Redis在下次重启时可以利用之前持久化的文件进行数据恢复。理解和掌握Redis的持久机制，对于Redis的日常开发和运维都有很大帮助，也是在大厂面试经常被问到的知识点。Redis支持的两种持久化机制：
+RDB：把当前数据生成快照保存在硬盘上。
+AOF：记录每次对数据的操作到硬盘上
+
+RDB持久化
+RDB（Redis DataBase）持久化是把当前Redis中全部数据生成快照保存在硬盘上。RDB持久化可以手动触发，也可以自动触发。
+
+手动触发
+save和bgsave命令都可以手动触发RDB持久化。
+
+save命令 ：
+执行save命令会手动触发RDB持久化，但是save命令会阻塞Redis服务，直到RDB持久化完成。当Redis服务储存大量数据时，会造成较长时间的阻塞，不建议使用。
+
+bgsave命令：
+执行bgsave命令也会手动触发RDB持久化，和save命令不同是：Redis服务一般不会阻塞。Redis进程会执行fork操作创建子进程，RDB持久化由子进程负责，不会阻塞Redis服务进程。Redis服务的阻塞只发生在fork阶段，一般情况时间很短。
+执行bgsave命令，Redis进程先判断当前是否存在正在执行的RDB或AOF子线程，如果存在就是直接结束，Redis进程执行fork操作创建子线程，在fork操作的过程中Redis进程会被阻塞
+Redis进程fork完成后，bgsave命令就结束了，自此Redis进程不会被阻塞，可以响应其他命令,子进程根据Redis进程的内存生成快照文件，并替换原有的RDB文件,子进程通过信号量通知Redis进程已完成
+
+自动触发：
+自动触发的RDB持久化都是采用bgsave的方式，减少Redis进程的阻塞
+场景自动触发
+在配置文件中设置了save的相关配置，如sava m n，它表示在m秒内数据被修改过n次时，自动触发bgsave操作,当从节点做全量复制时，主节点会自动执行bgsave操作，并且把生成的RDB文件发送给从节点,执行debug reload命令时，也会自动触发bgsave操作,执行shutdown命令时，如果没有开启AOF持久化也会自动触发bgsave操作
+
+RDB优点
+RDB文件是一个紧凑的二进制压缩文件，是Redis在某个时间点的全部数据快照。所以使用RDB恢复数据的速度远远比AOF的快，非常适合备份、全量复制、灾难恢复等场景。
+
+RDB缺点
+每次进行bgsave操作都要执行fork操作创建子经常，属于重量级操作，频繁执行成本过高，所以无法做到实时持久化，或者秒级持久化。
+
+
+AOF持久化
+AOF（AppendOnlyFile）持久化是把每次写命令追加写入日志中，当需要恢复数据时重新执行AOF文件中的命令就可以了。AOF解决了数据持久化的实时性，也是目前主流的Redis持久化方式
+命令追加（append）：所有写命令都会被追加到AOF缓存区（aof_buf）中
+文件同步（sync）：根据不同策略将AOF缓存区同步到AOF文件中。
+文件重写（rewrite）：定期对AOF文件进行重写，以达到压缩的目的。
+数据加载（load）：当需要恢复数据时，重新执行AOF文件中的命令。
+
+文件同步策略
+AOF持久化流程中的文件同步有以下几个策略：
+always：每次写入缓存区都要同步到AOF文件中，硬盘的操作比较慢，限制了Redis高并发，不建议配置。
+no：每次写入缓存区后不进行同步，同步到AOF文件的操作由操作系统负责，每次同步AOF文件的周期不可控，而且增大了每次同步的硬盘的数据量。
+eversec：每次写入缓存区后，由专门的线程每秒钟同步一次，做到了兼顾性能和数据安全。是建议的同步策略，也是默认的策略。
+
+触发文件重写
+AOF持久化流程中的文件重写可以手动触发，也可以自动触发
+手动触发：使用bgrewriteaof命令。
+自动触发：根据auto-aof-rewrite-min-size和auto-aof-rewrite-percentage配置确定自动触发的时机。auto-aof-rewrite-min-size表示运行AOF重写时文件大小的最小值，默认为64MB；auto-aof-rewrite-percentage表示当前AOF文件大小和上一次重写后AOF文件大小的比值的最小值，默认为100。只用前两者同时超过时才会自动触发文件重写
+
+
+---- 反射
+反射的概述: JAVA反射机制是在运行状态中，对于任意一个类，都能够知道这个类的所有属性和方法；对于任意一个对象，都能够调用它的任意一个方法和属性；这种动态获取的信息以及动态调用对象的方法的功能称为java语言的反射机制。要想解剖一个类,必须先要获取到该类的字节码文件对象。而解剖使用的就是Class类中的方法.所以先要获取到每一个字节码文件对应的Class类型的对象.
+像spring中的反射机制包括 cglib反向代理,
+
+其中获取对象的构造：clazz.getConstructors()
+获取所有公有的字段:stuClass.getFields()
+获取所有的公有方法: stuClass.getMethods()
+
+
+---- 类加载与类卸载
+类加载: Java中的代码都写在类里面，源代码（.java文件）经过编译后会变成字节码（.class文件），当Java应用程序运行时，JVM会加载要用到的类。
+负责类加载的是java.lang.ClassLoader的对象，ClassLoader的对象会根据类的binary name（不知道怎么翻译，二进制名？）来读取类的字节码，然后把这些字节码加载到JVM的方法区里，同时会在heap里面创建一个Class对象，这个Class对象是类的元数据和它的对象通信的接口。类在heap中的Class对象和加载它的ClassLoader对象之间有强引用。
+
+类卸载: 不像类加载，Java中没有提供显式进行类卸载的API，但是如果加载类的ClassLoader对象被垃圾回收器回收的话，这个类就会被卸载。所以我们可以自己实现ClassLoader，自己加载类，然后对ClassLoader对象的引用赋值为null，等ClassLoader对象剩下的引用数量为0时会被回收，这样就达到卸载类的目的了。
+
+
+---- 垃圾回收算法
+垃圾回收算法：
+标记清除法 标记没有被GC Root引用的对象 清除被标记位置的内存
+优点：处理速度快
+缺点：造成空间不连续，产生内存碎片
+
+标记整理法：标记没有被GC Root引用的对象 整理被引用的对象
+优点：空间连续，没有内存碎片
+缺点：整理导致效率较低
+
+---- 优化命令
+jinfo
+jmap 
+
+
+----- Thread 
+
+run()方法只是类的一个普通方法而已，如果直接调用Run方法，程序中依然只有主线程这一个线程，其程序执行路径还是只有一条，还是要顺序执行，还是要等待run方法体执行完毕后才可继续执行下面的代码，这样就没有达到写线程的目的。
+调用start方法方可启动线程，而run方法只是thread的一个普通方法调用，还是在主线程里执行。
+
+---- join
+join方法实际上是通过调用wait方法， 来实现同步的效果的。例如，A线程中调用了B线程的join方法，则相当于A线程调用了B线程的wait方法，在调用了B线程的wait方法后，A线程就会进入阻塞状态，因为它相当于放弃了CPU的使用权。需要注意的是，jdk规定，join(0)的意思不是A线程等待B线程0秒，而是A线程等待B线程无限时间，直到B线程执行完毕，即join(0)等价于join()
+
+
+----- Synchronized与ReentrantLock区别总结
+
+相似点：
+这两种同步方式有很多相似之处，它们都是加锁方式同步，而且都是阻塞式的同步，也就是说当如果一个线程获得了对象锁，进入了同步块，其他访问该同步块的线程都必须阻塞在同步块外面等待，而进行线程阻塞和唤醒的代价是比较高的（操作系统需要在用户态与内核态之间来回切换，代价很高，不过可以通过对锁优化进行改善）
+
+
+这两种方式最大区别就是对于Synchronized来说，它是java语言的关键字，是原生语法层面的互斥，需要jvm实现。而ReentrantLock它是JDK 1.5之后提供的API层面的互斥锁，需要lock()和unlock()方法配合try/finally语句块来完成
+
+便利性：很明显Synchronized的使用比较方便简洁，并且由编译器去保证锁的加锁和释放，而ReenTrantLock需要手工声明来加锁和释放锁，为了避免忘记手工释放锁造成死锁，所以最好在finally中声明释放锁。
+锁的细粒度和灵活度：很明显ReenTrantLock优于Synchronized
+
+在Synchronized优化以前，synchronized的性能是比ReenTrantLock差很多的，但是自从Synchronized引入了偏向锁，轻量级锁（自旋锁）后，两者的性能就差不多了，在两种方法都可用的情况下，官方甚至建议使用synchronized，其实synchronized的优化我感觉就借鉴了ReenTrantLock中的CAS技术。都是试图在用户态就把加锁问题解决，避免进入内核态的线程阻塞
+
+
+----- 线程池中 submit() 和 execute()方法区别
+execute() 参数 Runnable ；submit() 参数 (Runnable) 或 (Runnable 和 结果 T) 或 (Callable)
+execute() 没有返回值；而 submit() 有返回值
+submit() 的返回值 Future 调用get方法时，可以捕获处理异常
+
+
+
+---- Resource 和 Autowired 的区别
+ @Autowired默认按类型装配（这个注解是属业spring的），默认情况下必须要求依赖对象必须存在，如果要允许null值，可以设置它的required属性为false，如：@Autowired(required=false) ，如果我们想使用名称装配可以结合@Qualifier注解进行使用，如下：
+
+@Resource（这个注解属于J2EE的），默认按照名称进行装配，名称可以通过name属性进行指定，如果没有指定name属性，当注解写在字段上时，默认取字段名进行安装名称查找，如果注解写在setter方法上默认取属性名进行装配。当找不到与名称匹配的bean时才按照类型进行装配
+
+
+@Resource装配顺序 
+如果同时指定了name和type，则从Spring上下文中找到唯一匹配的bean进行装配，找不到则抛出异常 
+如果指定了name，则从上下文中查找名称（id）匹配的bean进行装配，找不到则抛出异常 
+如果指定了type，则从上下文中找到类型匹配的唯一bean进行装配，找不到或者找到多个，都会抛出异常 
+如果既没有指定name，又没有指定type，则自动按照byName方式进行装配；如果没有匹配，则回退为一个原始类型进行匹配，如果匹配则自动装配
+
+
+-----SpringMVC
+
+是一种基于Java，实现了Web MVC设计模式，请求驱动类型的轻量级Web框架，即使用了MVC架构模式的思想，将Web层进行职责解耦
+
+springMvc过程：
+发送请求至前端控制器DispatcherServlet,DispatcherServlet收到请求调用HandlerMapping处理器映射器,处理器映射器找到具体的处理器(可以根据xml配置、注解进行查找)生成处理器对象及处理器拦截器(如果有则生成)一并返回给DispatcherServlet,DispatcherServlet调用HandlerAdapter处理器适配器,HandlerAdapter经过适配调用具体的处理器(Controller，也叫后端控制器),Controller执行完成返回ModelAndView,HandlerAdapter将controller执行结果ModelAndView返回给DispatcherServlet,DispatcherServlet将ModelAndView传给ViewReslover视图解析器,ViewReslover解析后返回具体View,DispatcherServlet根据View进行渲染视图,DispatcherServlet响应用户。
+
+SpringMVC常用注解：
+@Controller：标识这个类是一个控制器
+@RequestBody : 将客户端请求过来的json转成java对象 
+@ResponseBody: 将java对象转成json，并且发送给客户端
+@RequestParam：当表单参数和方法形参名字不一致时，做一个名字映射
+
+Spring常用注解：
+@Autowired: 注解
+
+
+---- 什么是Spring
+Spring是一个开源框架，Spring是于2003 年兴起的一个轻量级的Java 开发框架,框架的主要优势之一就是其分层架构，分层架构允许使用者选择使用哪一个组件
+Spring的核心是控制反转（IoC）和面向切面（AOP）
+
+Spring的优点
+方便解耦，简化开发高内聚低耦合 :Spring就是一个大工厂（容器），可以将所有对象创建和依赖关系维护，交给Spring管理,spring工厂是用于生成bean
+AOP编程的支持：Spring提供面向切面编程，可以方便的实现对程序进行权限拦截、运行监控等功能
+声明式事务的支持: 只需要通过配置就可以完成对事务的管理，而无需手动编程
+方便集成各种优秀框架：Spring不排斥各种优秀的开源框架，其内部提供了对各种优秀框架（如：Struts、Hibernate、MyBatis、Quartz等）的直接支持
+降低JavaEE API的使用难度: Spring 对JavaEE开发中非常难用的一些API（JDBC、JavaMail、远程调用等），都提供了封装，使这些API应用难度大大降低
+
+
+----- Spring的核心是控制反转（IoC）和面向切面（AOP）
+
+IOC: 控制反转
+即控制权的转移，将我们创建对象的方式反转了,以前对象的创建是由我们开发人员自己维护,包括依赖关系也是自己注入。使用了spring之后，对象的创建以及依赖关系可以由spring完成创建以及注入，反转控制就是反转了对象的创建方式，从我们自己创建反转给了程序创建(spring)
+
+DI:  Dependency Injection  依赖注入
+实现IOC思想需要DI做支持,spring这个容器中,管理着一系列的类，前提是你需要将这些类交给spring容器进行管理，然后在你需要的时候，不是自己去定义，而是直接向spring容器索取，当spring容器知道你的需求之后，就会去它所管理的组件中进行查找，然后直接给你所需要的组件.
+
+什么是AOP:
+在保证业务核心功能的情况下,织入其他附属功能,利用AOP可以对业务逻辑的各个部分进行隔离，从而使得业务逻辑各部分之间的耦合度降低，提高程序的可重用性，同时提高了开发的效率。
+
+----- AOP实现原理: aop底层将采用代理机制进行实现
+接口 + 实现类 ：spring采用 jdk 的动态代理Proxy
+实现类：spring 采用 cglib字节码增强。
+
+AOP术语：
+1.target：目标类，需要被代理的类。
+2.Joinpoint(连接点):所谓连接点是指那些可能被拦截到的方法。例如：所有的方法
+3.PointCut 切入点：已经被增强的连接点。例如：addUser()
+4.advice 通知/增强，增强代码。例如：after、before
+5. Weaving(织入):是指把增强advice应用到目标对象target来创建新的代理对象proxy的过程.
+6.proxy 代理类
+7. Aspect(切面): 是切入点pointcut和通知advice的结合
+一个线是一个特殊的面,一个切入点和一个通知，组成成一个特殊的面。
+
+----- spring Bean 的生命周期
+实例化bean对象(通过构造方法或者工厂方法)
+设置对象属性(setter等)（依赖注入）
+如果Bean实现了BeanNameAware接口，工厂调用Bean的setBeanName()方法传递Bean的ID。（和下面的一条均属于检查Aware接口）
+如果Bean实现了BeanFactoryAware接口，工厂调用setBeanFactory()方法传入工厂自身
+将Bean实例传递给Bean的前置处理器的postProcessBeforeInitialization(Object bean, String beanname)方法
+调用Bean的初始化方法
+将Bean实例传递给Bean的后置处理器的postProcessAfterInitialization(Object bean, String beanname)方法
+使用Bean
+容器关闭之前，调用Bean的销毁方法
+
+
+----- 工厂设计模式
+Spring使用工厂模式可以通过 BeanFactory 或 ApplicationContext 创建 bean 对象。
+
+两者对比：
+BeanFactory ：延迟注入(使用到某个 bean 的时候才会注入),相比于BeanFactory 来说会占用更少的内存，程序启动速度更快。
+ApplicationContext ：容器启动的时候，不管你用没用到，一次性创建所有 bean 。BeanFactory 仅提供了最基本的依赖注入支持，ApplicationContext 扩展了 BeanFactory ,除了有BeanFactory的功能还有额外更多功能，所以一般开发人员使用ApplicationContext会更多。
+
+----- 单例设计模式
+
+对于频繁使用的对象，可以省略创建对象所花费的时间，这对于那些重量级对象而言，是非常可观的一笔系统开销；
+由于 new 操作的次数减少，因而对系统内存的使用频率也会降低，这将减轻 GC 压力，缩短 GC 停顿时间。
+Spring 中 bean 的默认作用域就是 singleton(单例)的
+
+Spring 实现单例的方式：
+
+Spring 通过 ConcurrentHashMap 实现单例注册表的特殊方式实现单例模式。Spring 实现单例的核心代码如下
+
+private final Map<String, Object> singletonObjects = new ConcurrentHashMap<String, Object>(64);
+ 
+public Object getSingleton(String beanName, ObjectFactory<?> singletonFactory) {
+        Assert.notNull(beanName, "'beanName' must not be null");
+        synchronized (this.singletonObjects) {
+            // 检查缓存中是否存在实例  
+            Object singletonObject = this.singletonObjects.get(beanName);
+            if (singletonObject == null) {
+                //...省略了很多代码
+                try {
+                    singletonObject = singletonFactory.getObject();
+                }
+                //...省略了很多代码
+                // 如果实例对象在不存在，我们注册到单例注册表中。
+                addSingleton(beanName, singletonObject);
+            }
+            return (singletonObject != NULL_OBJECT ? singletonObject : null);
+        }
+    }
+    //将对象添加到单例注册表
+    protected void addSingleton(String beanName, Object singletonObject) {
+            synchronized (this.singletonObjects) {
+                this.singletonObjects.put(beanName, (singletonObject != null ? singletonObject : NULL_OBJECT));
+ 
+            }
+        }
+}
+
+----- 代理设计模式
+
+Spring AOP 就是基于动态代理的，如果要代理的对象，实现了某个接口，那么Spring AOP会使用JDK Proxy，去创建代理对象，而对于没有实现接口的对象，就无法使用 JDK Proxy 去进行代理了，这时候Spring AOP会使用Cglib ，这时候Spring AOP会使用 Cglib 生成一个被代理对象的子类来作为代理，如下图所示：
+
+----- 观察者模式
+观察者模式是一种对象行为型模式。它表示的是一种对象与对象之间具有依赖关系，当一个对象发生改变的时候，这个对象所依赖的对象也会做出反应。Spring 事件驱动模型就是观察者模式很经典的一个应用。Spring 事件驱动模型非常有用，在很多场景都可以解耦我们的代码。比如我们每次添加商品的时候都需要重新更新商品索引，这个时候就可以利用观察者模式来解决这个问题
+
+Spring 事件驱动模型中的三种角色
+事件角色
+ApplicationEvent (org.springframework.context包下)充当事件的角色,这是一个抽象类，它继承了java.util.EventObject并实现了 java.io.Serializable接口。
+Spring 中默认存在以下事件，他们都是对 ApplicationContextEvent 的实现(继承自ApplicationContextEvent)：
+
+ContextStartedEvent：ApplicationContext 启动后触发的事件;
+ContextStoppedEvent：ApplicationContext 停止后触发的事件;
+ContextRefreshedEvent：ApplicationContext 初始化或刷新完成后触发的事件;
+ContextClosedEvent：ApplicationContext 关闭后触发的事件
+
+事件监听者角色
+ApplicationListener 充当了事件监听者角色，它是一个接口，里面只定义了一个 onApplicationEvent（）方法来处理ApplicationEvent。ApplicationListener接口类源码如下，可以看出接口定义看出接口中的事件只要实现了 ApplicationEvent就可以了。所以，在 Spring中我们只要实现 ApplicationListener 接口实现 onApplicationEvent() 方法即可完成监听事件
+
+ApplicationEventPublisher 充当了事件的发布者，它也是一个接口。
+
+ApplicationEventPublisher 接口的publishEvent（）这个方法在AbstractApplicationContext类中被实现，阅读这个方法的实现，你会发现实际上事件真正是通过ApplicationEventMulticaster来广播出去的。具体内容过多，就不在这里分析了，后面可能会单独写一篇文章提到。
+
+Spring 的事件流程总结
+定义一个事件: 实现一个继承自 ApplicationEvent，并且写相应的构造函数；
+定义一个事件监听者：实现 ApplicationListener 接口，重写 onApplicationEvent() 方法；
+使用事件发布者发布消息: 可以通过 ApplicationEventPublisher 的 publishEvent() 方法发布消息。
+
+----- 适配器模式
+适配器模式(Adapter Pattern) 将一个接口转换成客户希望的另一个接口，适配器模式使接口不兼容的那些类可以一起工作，其别名为包装器(Wrapper)。
+
+spring MVC中的适配器模式
+在Spring MVC中，DispatcherServlet 根据请求信息调用 HandlerMapping，解析请求对应的 Handler。解析到对应的 Handler（也就是我们平常说的 Controller 控制器）后，开始由HandlerAdapter 适配器处理。HandlerAdapter 作为期望接口，具体的适配器实现类用于对目标类进行适配，Controller 作为需要适配的类。
+
+工厂设计模式 : Spring使用工厂模式通过 BeanFactory、ApplicationContext 创建 bean 对象。
+代理设计模式 : Spring AOP 功能的实现。
+单例设计模式 : Spring 中的 Bean 默认都是单例的。
+模板方法模式 : Spring 中 jdbcTemplate、hibernateTemplate 等以 Template 结尾的对数据库操作的类，它们就使用到了模板模式。
+包装器设计模式 : 我们的项目需要连接多个数据库，而且不同的客户在每次访问中根据需要会去访问不同的数据库。这种模式让我们可以根据客户的需求能够动态切换不同的数据源。
+观察者模式: Spring 事件驱动模型就是观察者模式很经典的一个应用。
+适配器模式 :Spring AOP 的增强或通知(Advice)使用到了适配器模式、spring MVC 中也是用到了适配器模式适配Controller。
+
+
+----- MyBatis
+一、什么是Mybatis？
+
+Mybatis是半自动ORM 映射工具,而Mybatis 在查询关联对象或关联集合对象时，需要手动编写 sql 来完成，所以，称之为半自动 ORM 映射工具Mybatis是一个半自动的ORM持久层框架，内部封装了JDBC。作为开发者只需要关注sql语句本身。Mybatis是通过xml或注解的方式将需要执行的各种statement配置起来。通过Java对象和statement中的sql动态参数映射生成最终执行的sql语句，最终由Mabtais框架执行sql并将结果映射为Java对象并返回。MyBatis 支持定制化 SQL、存储过程以及高级映射。MyBatis 是可以双向映射的，可以将数据集映射为Java对象，也可以将Java对象映射为数据库中的记录。
+
+优点：Mybait的优点：
+简单易学，容易上手（相比于Hibernate）  基于SQL编程；
+JDBC相比，减少了50%以上的代码量，消除了JDBC大量冗余的代码，不需要手动开关连接；
+很好的与各种数据库兼容（因为MyBatis使用JDBC来连接数据库，所以只要JDBC支持的数据库MyBatis都支持，而JDBC提供了可扩展性，所以只要这个数据库有针对Java的jar包就可以就可以与MyBatis兼容），开发人员不需要考虑数据库的差异性。
+提供了很多第三方插件（分页插件 / 逆向工程）；
+能够与Spring很好的集成；
+MyBatis相当灵活，不会对应用程序或者数据库的现有设计强加任何影响，SQL写在XML里，从程序代码中彻底分离，解除sql与程序代码的耦合，便于统一管理和优化，并可重用。
+提供XML标签，支持编写动态SQL语句。
+提供映射标签，支持对象与数据库的ORM字段关系映射。
+提供对象关系映射标签，支持对象关系组建维护。
+
+MyBatis框架的缺点：SQL语句的编写工作量较大，尤其是字段多、关联表多时，更是如此，对开发人员编写SQL语句的功底有一定要求,SQL语句依赖于数据库，导致数据库移植性差，不能随意更换数据库
+
+----- MyBatis一级缓存和二级缓存
+MyBatis 的缓存分为一级缓存和二级缓存,一级缓存放在 session 里面,默认就有,二级缓存放在它的命名空间里,默认是不打开的,使用二级缓存属性类需要实现 Serializable 序列化接口(可用来保存对象的状态),可在它的映射文件中配置、
+
+----- Mybatis分页插件的原理
+Mybatis 使用 RowBounds 对象进行分页，也可以直接编写 sql 实现分页，也可以使用Mybatis 的分页插件。
+分页插件的原理：实现 Mybatis 提供的接口，实现自定义插件，在插件的拦截方法内拦截待执行的 sql，然后重写 sql。
+举例：select * from student，拦截 sql 后重写为：select t.* from （select * from student）tlimit 0，10
+
+
+---- Mybatis 是否支持延迟加载
+Mybatis 是否支持延迟加载,如果支持，它的实现原理是什么
+Mybatis 仅支持 association 关联对象和 collection 关联集合对象的延迟加载，association指的就是一对一，collection 指的就是一对多查询。在 Mybatis 配置文件中，可以配置是否启用延迟加载 lazyLoadingEnabled=true|false。
+它的原理是，使用 CGLIB 创建目标对象的代理对象，当调用目标方法时，进入拦截器方法，比如调用 a.getB().getName()，拦截器 invoke()方法发现 a.getB()是 null 值，那么就会单独发送事先保存好的查询关联 B 对象的 sql，把 B 查询上来，然后调用 a.setB(b)，于是 a 的对象 b 属性就有值了，接着完成 a.getB().getName()方法的调用。这就是延迟加载的基本原理。
+
+----- MyBatis 与 Hibernate
+MyBatis 与 Hibernate 有哪些不同
+Mybatis 和 hibernate 不同，它不完全是一个 ORM 框架，因为 MyBatis 需要程序员自己编写 Sql 语句，不过 mybatis 可以通过 XML 或注解方式灵活配置要运行的 sql 语句，并将java 对象和 sql 语句映射生成最终执行的 sql，最后将 sql 执行的结果再映射生成 java 对象。
+Mybatis 学习门槛低，简单易学，程序员直接编写原生态 sql，可严格控制 sql 执行性能，灵活度高，非常适合对关系数据模型要求不高的软件开发，例如互联网软件、企业运营类软件等，因为这类软件需求变化频繁，一但需求变化要求成果输出迅速。但是灵活的前提是 mybatis 无法做到数据库无关性，如果需要实现支持多种数据库的软件则需要自定义多套 sql 映射文件，工作量大。
+Hibernate 对象/关系映射能力强，数据库无关性好，对于关系模型要求高的软件（例如需求固定的定制化软件）如果用 hibernate 开发可以节省很多代码，提高效率。但是Hibernate 的缺点是学习门槛高，要精通门槛更高，而且怎么设计 O/R 映射，在性能和对象模型之间如何权衡，以及怎样用好 Hibernate 需要具有很强的经验和能力才行。总之，按照用户的需求在有限的资源环境下只要能做出维护性、扩展性良好的软件架构都是好架构，所以框架只有适合才是最好。
+
+----- Mybatis 是如何将 sql 执行结果封装为目标对象并返回的？都有哪些映射形式？
+第一种是使用标签，逐一定义列名和对象属性名之间的映射关系。
+第二种是使用 sql 列的别名功能，将列别名书写为对象属性名，比如 T_NAME AS NAME，对
+象属性名一般是 name，小写，但是列名不区分大小写，Mybatis 会忽略列名大小写，智能
+找到与之对应对象属性名，你甚至可以写成 T_NAME AS NaMe，Mybatis 一样可以正常工
+作。
+有了列名与属性名的映射关系后，Mybatis 通过反射创建对象，同时使用反射给对象的属性
+逐一赋值并返回，那些找不到映射关系的属性，是无法完成赋值的。
+
+
+----- Mysql的三范式
+
+第一范式（1NF）:列不可再分
+1.每一列属性都是不可再分的属性值，确保每一列的原子性
+2.两列的属性相近或相似或一样，尽量合并属性一样的列，确保不产生冗余数据
+
+第二范式（2NF）属性完全依赖于主键
+第二范式（2NF）是在第一范式（1NF）的基础上建立起来的，即满足第二范式（2NF）必须先满足第一范式（1NF）。第二范式（2NF）要求数据库表中的每个实例或行必须可以被惟一地区分。为实现区分通常需要为表加上一个列，以存储各个实例的惟一标识。这个惟一属性列被称为主键
+
+第三范式（3NF）属性不依赖于其它非主属性    属性直接依赖于主键
+数据不能存在传递关系，即每个属性都跟主键有直接关系而不是间接关系
+
+
+----- Mysql的引擎:
+
+InnoDB支持事务，MyISAM不支持，对于InnoDB每一条SQL语言都默认封装成事务，自动提交，这样会影响速度，所以最好把多条SQL语言放在begin和commit之间，组成一个事务； 
+InnoDB支持外键，而MyISAM不支持。对一个包含外键的InnoDB表转为MYISAM会失败； 
+
+InnoDB是聚集索引，使用B+Tree作为索引结构，数据文件是和（主键）索引绑在一起的（表数据文件本身就是按B+Tree组织的一个索引结构），必须要有主键，通过主键索引效率很高。但是辅助索引需要两次查询，先查询到主键，然后再通过主键查询到数据。因此，主键不应该过大，因为主键太大，其他索引也都会很大。
+
+ MyISAM是非聚集索引，也是使用B+Tree作为索引结构，索引和数据文件是分离的，索引保存的是数据文件的指针。主键索引和辅助索引是独立的。
+也就是说：InnoDB的B+树主键索引的叶子节点就是数据文件，辅助索引的叶子节点是主键的值；而MyISAM的B+树主键索引和辅助索引的叶子节点都是数据文件的地址指针。
+
+MEMORY： 所有的数据都在内存中，数据的处理速度快，但是安全性不高。如果需要很快的读写速度，对数据的安全性要求较低，可以选择MEMOEY。它对表的大小有要求，不能建立太大的表。所以，这类数据库只使用在相对较小的数据库表。
+
+可以通过engine关键字在创建或修改数据库时指定所使用到引擎,在创建表的时候通过engine=...或type=...来指定所要使用的引擎。show table status from DBname来查看指定表的引擎
+
+
+视图：视图(VIEW)也被称作虚表，即虚拟的表，是一组数据的逻辑表示,其本质是对应于一条SELECT语句，结果集被赋予一个名字，即视图名字。
+视图本身并不包含任何数据，它只包含映射到基表的一个查询语句，当基表数据发生变化，视图数据也随之变化
+
+----- 垂直划分：
+
+----- 垂直分表:
+垂直分表定义：将一个表按照字段分成多表，每个表存储其中一部分字段 例如：数据访问频次较高 和 字段访问频次较低 两种数据的特性不一样
+为了避免IO争抢并减少锁表的几率，查看详情的用户与商品信息浏览互不影响,充分发挥热门数据的操作效率，商品信息的操作的高效率不会被商品描述的低效率所拖累
+为什么大字段IO效率低：第一是由于数据量本身大，需要更长的读取时间；第二是跨页，页是数据库存储单位，很多查找及定位操作都是以页为单位，单页内的数据行越多数据库整体性能越好，而大字段占用空间大，单页内存储行数少，因此IO效率较低。第三，数据库以行为单位将数据加载到内存中，这样表中字段长度较短且访问频率较高，内存能加载更多的数据，命中率更高，减少了磁盘IO，从而提升了数据库性能。
+
+一般来说，某业务实体中的各个数据项的访问频次是不一样的，部分数据项可能是占用存储空间比较大的BLOB或是TEXT。例如上例中的商品描述。所以，当表数据量很大时，可以将表按字段切开，将热门字段、冷门字段分开放置在不同库中，这些库可以放在不同的存储设备上，避免IO争抢。垂直切分带来的性能提升主要集中在热门数据的操作效率上，而且磁盘争用情况减少。
+通常我们按以下原则进行垂直拆分:把不常用的字段单独放在一张表;把text，blob等大字段拆分出来放在附表中;经常组合查询的列放在一张表中;
+
+----- 垂直分库:是指按照业务将表进行分类，分布到不同的数据库上面，每个库可以放在不同的服务器上，它的核心理念是专库专用
+解决业务层面的耦合，业务清晰；能对不同业务的数据进行分级管理、维护、监控、扩展等；高并发场景下，垂直分库一定程度的提升IO、数据库连接数、降低单机硬件资源的瓶颈
+垂直分库通过将表按业务分类，然后分布在不同数据库，并且可以将这些数据库部署在不同服务器上，从而达到多个服务器共同分摊压力的效果，但是依然没有解决单表数据量过大的问题
+
+----- 水平分库
+经过垂直分库后，数据库性能问题得到一定程度的解决，但是随着业务量的增长，PRODUCT_DB(商品库)单库存储数据已经超出预估。粗略估计，目前有8w店铺，每个店铺平均150个不同规格的商品，再算上增长，那商品数量得往1500w+上预估，并且PRODUCT_DB(商品库)属于访问非常频繁的资源，单台服务器已经无法支撑
+尝试水平分库，将店铺ID为单数的和店铺ID为双数的商品信息分别放在两个库中
+
+水平分库是把同一个表的数据按一定规则拆到不同的数据库中，每个库可以放在不同的服务器上
+也就是说，要操作某条数据，先分析这条数据所属的店铺ID。如果店铺ID为双数
+
+解决了单库大数据，高并发的性能瓶颈。
+提高了系统的稳定性及可用性。
+稳定性体现在IO冲突减少，锁定减少，可用性指某个库出问题，部分可用
+
+---- 水平分表
+与水平分库的思路类似，不过这次操作的目标是表，商品信息及商品描述被分成了两套表。如果商品ID为双数，将此操作映射至商品信息1表；如果商品ID为单数，将操作映射至商品信息2表。此操作要访问表名称的表达式为商品信息[商品ID%2 + 1] 。
+
+水平分表是在同一个数据库内，把同一个表的数据按一定规则拆到多个表中。
+优化单一表数据量过大而产生的性能问题,避免IO争抢并减少锁表的几率,库内的水平分表，解决了单一表数据量过大的问题，分出来的小表中只包含一部分数据，从而使得单个表的数据量变小，提高检索性能。
+
+
+垂直分表：可以把一个宽表的字段按访问频次、是否是大字段的原则拆分为多个表，这样既能使业务清晰，还能提升部分性能。拆分后，尽量从业务角度避免联查，否则性能方面将得不偿失。
+
+垂直分库：可以把多个表按业务耦合松紧归类，分别存放在不同的库，这些库可以分布在不同服务器，从而使访问压力被多服务器负载，大大提升性能，同时能提高整体架构的业务清晰度，不同的业务库可根据自身情况定制优化方案。但是它需要解决跨库带来的所有复杂问题。
+
+水平分库：可以把一个表的数据(按数据行)分到多个不同的库，每个库只有这个表的部分数据，这些库可以分布在不同服务器，从而使访问压力被多服务器负载，大大提升性能。它不仅需要解决跨库带来的所有复杂问题，还要解决数据路由的问题(数据路由问题后边介绍)。
+
+水平分表：可以把一个表的数据(按数据行)分到多个同一个数据库的多张表中，每个表只有这个表的部分数据，这样做能小幅提升性能，它仅仅作为水平分库的一个补充优化。
+
+一般来说，在系统设计阶段就应该根据业务耦合松紧来确定垂直分库，垂直分表方案，在数据量及访问压力不是特别大的情况，首先考虑缓存、读写分离、索引技术等方案。若数据量极大，且持续增长，再考虑水平分库水平分表方案
+
+
+
+
+----- Spring Cloud
+---- 什么是微服务架构
+微服务架构就是将单体的应用程序分成多个应用程序，这多个应用程序就成为微服务，每个微服务运行在自己的进程中，并使用轻量级的机制通信。这些服务围绕业务能力来划分，并通过自动化部署机制来独立部署。这些服务可以使用不同的编程语言，不同数据库，以保证最低限度的集中式管理。
+
+
+springcloud就基于SpringBoot把市场上优秀的服务框架组合起来，通过Spring Boot风格进行再封装屏蔽掉了复杂的配置和实现原理
+什么叫做开箱即用？即使是当年的黄金搭档dubbo+zookeeper下载配置起来也是颇费心神的！而springcloud完成这些只需要一个jar的依赖就可以了！
+springcloud大多数子模块都是直击痛点，像zuul解决的跨域，fegin解决的负载均衡，hystrix的熔断机制等等等等
+
+----- SpringCloud的优缺点：
+优点：
+1.耦合度比较低。不会影响其他模块的开发。
+2.减轻团队的成本，可以并行开发，不用关注其他人怎么开发，先关注自己的开发。
+3.配置比较简单，基本用注解就能实现，不用使用过多的配置文件。
+4.微服务跨平台的，可以用任何一种语言开发。
+5.每个微服务可以有自己的独立的数据库也有用公共的数据库。
+6.直接写后端的代码，不用关注前端怎么开发，直接写自己的后端代码即可，然后暴露接口，通过组件进行服务通信。
+缺点：
+1.部署比较麻烦，给运维工程师带来一定的麻烦。
+2.针对数据的管理比麻烦，因为微服务可以每个微服务使用一个数据库。
+3.系统集成测试比较麻烦
+4.性能的监控比较麻烦。【最好开发一个大屏监控系统】
+总的来说优点大过于缺点，目前看来Spring Cloud是一套非常完善的分布式框架，目前很多企业开始用微服务、Spring Cloud的优势是显而易见的。因此对于想研究微服务架构的同学来说，学习Spring Cloud是一个不错的选择
+
+
+----- SpringBoot和SpringCloud的区别
+SpringBoot专注于快速方便的开发单个个体微服务。
+SpringCloud是关注全局的微服务协调整理治理框架，它将SpringBoot开发的一个个单体微服务整合并管理起来，
+为各个微服务之间提供，配置管理、服务发现、断路器、路由、微代理、事件总线、全局锁、决策竞选、分布式会话等等集成服务
+SpringBoot可以离开SpringCloud独立使用开发项目， 但是SpringCloud离不开SpringBoot ，属于依赖的关系
+SpringBoot专注于快速、方便的开发单个微服务个体，SpringCloud关注全局的服务治理框架
+
+---- SpringCloud由什么组成：
+这就有很多了，我讲几个开发中最重要的
+Spring Cloud Eureka：服务注册与发现
+Spring Cloud Zuul：服务网关
+Spring Cloud Ribbon：客户端负载均衡
+Spring Cloud Feign：声明性的Web服务客户端
+Spring Cloud Hystrix：断路器
+Spring Cloud Confifig：分布式统一配置管理
+
+----- Spring Cloud 和dubbo区别?
+
+服务调用方式：dubbo是RPC springcloud Rest Api
+注册中心：dubbo 是zookeeper springcloud是eureka，也可以是zookeeper
+服务网关，dubbo本身没有实现，只能通过其他第三方技术整合，springcloud有Zuul路由网关，作为路由服务器，进行消费者的请求分发,springcloud支持断路器，与git完美集成配置文件支持版本控制，事物总线实现配置文件的更新与服务自动装配等等一系列的微服务架构要素。
+
+
+----- 什么是Eureka
+Eureka:
+Eureka作为SpringCloud的服务注册功能服务器，他是服务注册中心，系统中的其他服务使用Eureka的客户端将其连接到Eureka的Service中，并且保持心跳，这样工作人员可以通过EurekaService来监控各个微服务是否运行正常
+
+Eureka高可用:
+集群吧，注册多台 Eureka ，然后把 SpringCloud 服务互相注册，客户端从 Eureka 获取信息时，按照Eureka 的顺序来访问
+
+Eureka的自我保护模式:
+默认情况下，如果 Eureka Service 在一定时间内没有接收到某个微服务的心跳， Eureka Service 会进入自我保护模式，在该模式下Eureka Service 会保护服务注册表中的信息，不在删除注册表中的数据，当网络故障恢复后，Eureka Servic 节点会自动退出自我保护模式
+
+Eureka和ZooKeeper都可以提供服务注册与发现的功能,两个的区别:
+ZooKeeper中的节点服务挂了就要选举 在选举期间注册服务瘫痪,虽然服务最终会恢复,但是选举期间不可用的， 选举就是改微服务做了集群，必须有一台主其他的都是从
+Eureka各个节点是平等关系,服务器挂了没关系，只要有一台Eureka就可以保证服务可用，数据都是最新的。 如果查询到的数据并不是最新的，就是因为Eureka的自我保护模式导致的
+Eureka本质上是一个工程,而ZooKeeper只是一个进程
+Eureka可以很好的应对因网络故障导致部分节点失去联系的情况,而不会像ZooKeeper 一样使得整个注册系统瘫痪
+ZooKeeper保证的是CP，Eureka保证的是AP
+CAP： C：一致性>Consistency; 取舍：(强一致性、单调一致性、会话一致性、最终一致性、弱一致性) A：可用性>Availability; P：分区容错性>Partition tolerance;
+
+
+----- 什么是网关?
+网关相当于一个网络服务架构的入口，所有网络请求必须通过网关转发到具体的服务。
+
+----- 网关的作用是什么
+统一管理微服务请求，权限控制、负载均衡、路由转发、监控、安全控制黑名单和白名单等
+
+网关与过滤器有什么区别
+网关是对所有服务的请求进行分析过滤，过滤器是对单个服务而言。
+
+常用网关框架有那些
+Nginx 、 Zuul 、 Gateway
+
+---- Zuul与Nginx有什么区别？
+Zuul 是 java 语言实现的，主要为 java 服务提供网关服务，尤其在微服务架构中可以更加灵活的对网关进行操作。Nginx 是使用 C 语言实现，性能高于 Zuul ，但是实现自定义操作需要熟悉 lua 语言，对程序员要求较高，可以使用Nginx 做 Zuul 集群。
+
+----- 如何实现动态Zuul网关路由转发
+通过 path 配置拦截请求，通过 ServiceId 到配置中心获取转发的服务列表， Zuul 内部使用 Ribbon 实现本地负载均衡和转发
+
+ZuulFilter常用有那些方法
+Run()：过滤器的具体业务逻辑
+shouldFilter()：判断过滤器是否有效
+fifilterOrder()：过滤器执行顺序
+fifilterType()：过滤器拦截位置
+
+Zuul网关如何搭建集群
+使用 Nginx 的 upstream 设置 Zuul 服务集群，通过 location 拦截请求并转发到 upstream ，默认使用轮询机制对Zuul 集群发送请求。
+
+Ribbon底层实现原理
+Ribbon 使用 discoveryClient 从注册中心读取目标服务信息，对同一接口请求进行计数，使用 % 取余算法获取目标服务集群索引，返回获取到的目标服务信息
+
+@LoadBalanced注解的作用
+开启客户端负载均衡。
+
+DiscoveryClient的作用
+可以从注册中心中根据服务别名获取注册的服务器信息。
+
+
+------ JVM内存模型 ：  JVM虚拟机数据区：程序计数器(PC寄存器) 本地方法栈 java栈（前三者为线程隔离区） 堆   本地内存区(不属于虚拟机)：元数据区 + 直接内存
+程序计数器(PC寄存器)：
+由于在JVM中，多线程是通过线程轮流切换来获得CPU执行时间的，因此，在任一具体时刻，一个CPU的内核只会执行一条线程中的指令，因此，为了能够使得每个线程都在线程切换后能够恢复在切换之前的程序执行位置，每个线程都需要有自己独立的程序计数器，并且不能互相被干扰，否则就会影响到程序的正常执行次序。因此，可以这么说，程序计数器是每个线程所私有的。由于程序计数器中存储的数据所占空间的大小不会随程序的执行而发生改变,因此，对于程序计数器是不会发生内存溢出现象(OutOfMemory)的
+
+java栈:
+Java栈中存放的是一个个的栈帧，每个栈帧对应一个被调用的方法，在栈帧中包括局部变量表(Local Variables)、操作数栈(Operand Stack)、
+指向当前方法所属的类的运行时常量池的引用(Reference to runtime constant pool)、方法返回地址(ReturnAddress)和一些额外的附加信息。当线程执行一个方法时，就会随之创建一个对应的栈帧，并将建立的栈帧压栈。当方法执行完毕之后，便会将栈帧出栈。
+
+本地方法栈:本地方法栈与Java栈的作用和原理非常相似,区别只不过是Java栈是为执行Java方法服务的，而本地方法栈则是为执行本地方法（Native Method）服务的 如notify，hashcode，wait等都是native方法
+
+堆:Java中的堆是用来存储对象本身的以及数组（数组引用是存放在Java栈中的）。堆是被所有线程共享的，在JVM中只有一个堆。
+
+
+元空间（本质上是方法区的具体实现）:元数据区取代了1.7版本及以前的永久代。元数据区和永久代本质上都是方法区的实现。方法区存放虚拟机加载的类信息，静态变量，常量等数据。
+方法区:与堆一样，是被线程共享的区域。在方法区中，存储了每个类的信息（包括类的名称、方法信息、字段信息）、静态变量、常量以及编译器编译后的代码等
+在Class文件中除了类的字段、方法、接口等描述信息外，还有一项信息是常量池，用来存储编译期间生成的字面量和符号引用。
+在方法区中有一个非常重要的部分就是运行时常量池，它是每一个类或接口的常量池的运行时表示形式，在类和接口被加载到JVM后，
+
+对应的运行时常量池就被创建出来。当然并非Class文件常量池中的内容才能进入运行时常量池，在运行期间也可将新的常量放入运行时常量池中，比如String的intern方法。
+
+
+
+----- 堆和栈的区别
+栈内存:栈内存首先是一片内存区域，存储的都是局部变量，凡是定义在方法中的都是局部变量（方法外的是全局变量）。栈内存的更新速度很快，因为局部变量的生命周期都很短,实行的是一个 先进后出/后进先出的规则
+
+堆内存:存储的是数组和对象（其实数组就是对象），凡是new建立的都是在堆中，堆中存放的都是实体（对象），实体用于封装数据，而且是封装多个（实体的多个属性），如果一个数据消失，这个实体也没有消失，还可以用，所以堆是不会随时释放的，但是栈不一样，栈里存放的都是单个变量，变量被释放了，那就没有了。堆里的实体虽然不会被释放，但是会被当成垃圾，Java有垃圾回收机制不定时的收取。
+
+------ 程序运行很长时间没有结果（死锁问题）
+jstack 进程id 获取进程栈信息
+查看最后20行左右有无‘Fount one Java-level deadlock’
+
+------ CPU占用过高（定位问题）
+‘top’命令获取进程编号，查找占用高的进程
+‘ps H -eo pid,tid,%cpu | grep 进程号’ 命令获取线程的进程id，线程id，cpu占用
+将查看到的占用高的线程的线程号转化成16进制的数 ：如6626->19E2
+‘ jstack 进程id ’获取进程栈信息, 查找‘nid=0X19E2’的线程
+问题线程的最开始‘#数字’表示出现问题的行数，回到代码查看
+
+---- 堆内存诊断
+命令行方式：‘jps’获取运行进程号,‘jmap -heap 进程号’查看当前时刻的堆内存信息
+jconsole命令行输入jconsole打开可视化的界面连接上进程可视化的检测连续的堆内存信息
+jvisualvm命令行输入jvisualvm打开可视化界面选择进程可视化的查看堆内存信息
+
+
+----- Minor GC ，Full GC 触发条件:
+Minor GC触发条件：当Eden区满时，触发Minor GC。
+
+----- Full GC触发条件：
+调用System.gc时，系统建议执行Full GC，但是不必然执行
+老年代空间不足
+方法区空间不足
+通过Minor GC后进入老年代的平均大小大于老年代的可用内存
+由Eden区、From Space区向To Space区复制时，对象大小大于To Space可用内存，则把该对象转存到老年代，且老年代的可用内存小于该对象大小
+
+
+---- java跟平台无关的语言
+JVM是Machine（Java虚拟机）的缩写，JVM是一种用于计算设备的规范，它是一个虚构出来的计算机，是通过在实际的计算机上仿真模拟各种计算机功能来实现的
+Java语言的一个非常重要的特点就是与平台的 无关性。而使用Java虚拟机是实现这一特点的关键。一般的高级语言如果要在不同的平台上运行，至少需要编译成不同的目标代码。而引入Java语言虚拟机后，Java语言在不同平台上运行时不需要重新编译。Java语言使用Java虚拟机屏蔽了与平台相关的信息，使得Java语言编译程序只需生成在Java虚拟机上运行的目标代码（字节码），就可以在多种平台上不加修改的运行
+
+---- JVM加载class文件的原理机制
+ Java中的所有类，必须被装载到JVM中才能运行，这个装载工作是由JVM中的类装载器完成的，类装载器所做的工作实质是把类文件从硬盘读取到内存中，作用就是在运行时加载类。
+Java类加载器基于三个机制：委托、可见性和单一性。
+（1）委托机制是指加载一个类的请求交给父类加载器，如果这个父类加载器不能够找到或加载这个类，那么再加载它。
+（2）可见性的原理是子类的加载器可以看见所有的父类加载器加载的类，而父类加载器看不到子类加载器加载的类。
+（3）单一性原理是指一个类仅被加载一次，这是由委托机制确保子类加载器不会再次加载父类加载器加载过的类。
+
+----- 类加载的动态性体现
+一个应用程序总是由n多个类组成，Java程序启动时，并不是一次把所有的类全部加载再运行，他总是把保证程序运行的基础类一次性加载到JVM中，其他类等到JVM用到的时候再加载，这样是为了节省内存的开销，因为Java最早就是为嵌入式系统而设计的，内存宝贵，而用到时再加载这也是Java动态性的一种体现。
+
+---- Java类加载器
+BootStrap Loader（引导类加载器） ----- 负责加载系统类  加载系统环境变量下JAVA_HOME/lib目录下的类库。
+ExtClassLoader（扩展类加载器） ----- 负责加载扩展类     加载JAVA_HOME/lib/ext目录下的类库
+AppClassLoade（应用类加载器）r ----- 负责加载应用类:    加载用户类路径Class_Path指定的类库。（我们可以在使用第三方插件时，把jar包添加到ClassPath后就是使用了这个加载器）
+
+当执行Java的.class文件的时候，java.exe会帮助我们找到jRE，接着找到JRE内部的jcm.dll，这才是真正的Java虚拟机器，最后加载动态库，激活Java虚拟机器。虚拟机激活以后，会先做一些初始化的动作，比如说读取系统参数等,一旦初始化动作完成后，就会产生第一个类加载器-----Bootstrap Loader，Bootstrap Loader是由C++撰写而成，这个Bootstrap所做的初始工作中，除了一些基本的初始化动作之外，最重要的就是加载Launcher.java之中的ExtClassLoader，并设定其parent为null，代表其父加载器为BootstrapLoader。然后Bootstrap loader再要求加载Launcher.java之中的AppClassLoader，并设定其parent为之前产生的ExtClassLoader实体。这两个类加载器都是以静态类的形式存在的
+
+双亲委派模型是指：当一个类加载器收到类加载请求时，不会直接加载这个类，而是把这个加载请求委派给自己父加载器去完成。如果父加载器无法加载时，子加载器才会去尝试加载。
+采用双亲委派模型的原因：避免同一个类被多个类加载器重复加载
+
+
+---- 强引用
+强引用（Strong Reference）是指JVM内存管理器从根引用集合（RootSet）出发遍寻堆中所有到达对象的路径。当到达某对象的任意路径都不含有引用对象时，对这个对象的引用就被称为强引用
+
+---- 软引用
+软引用（Soft Reference）的主要特点是具有较强的引用功能。只有当内存不够的时候，才回收这类内存，因此在内存足够的时候，它们通常不被回收。另外，这些引用对象还能保证在Java抛出OutOfMemory异常之前，被设置为null。它可以用于实现一些常用资源的缓存，实现Cache的功能，保证最大限度的使用内存而不引起OutOfMemory
+
+---- 弱引用
+弱引用（Weak Reference）对象与Soft引用对象的最大不同就在于：GC在进行回收时，需要通过算法检查是否回收Soft引用对象，而对于Weak引用对象， GC总是进行回收。因此Weak引用对象会更容易、更快被GC回收。虽然，GC在运行时一定回收Weak引用对象，但是复杂关系的Weak对象群常常需要好几次GC的运行才能完成。Weak引用对象常常用于Map数据结构中，引用占用内存空间较大的对象，一旦该对象的强引用为null时，对这个对象引用就不存在了，GC能够快速地回收该对象空间
+
+---- 虚引用
+虚引用（PhantomReference）的用途较少，主要用于辅助finalize函数的使用。Phantom对象指一些执行完了finalize函数，并且为不可达对象，但是还没有被GC回收的对象
+
+
+----- java 对象生命周期
+对象的整个生命周期大致可以分为7个阶段：创建阶段（Creation）、应用阶段（Using）、不可视阶段（Invisible）、不可到达阶段（Unreachable）、可收集阶段（Collected）、终结阶段（Finalized）与释放阶段（Free）
+
+----- java 类的生命周期
+java类的生命周期就是指一个class文件从加载到卸载的全过程,类的完整生命周期包括7个部分：加载——验证——准备——解析——初始化——使用——卸载
+
+加载阶段: 虚拟机需要完成三件事：通过类名字获取类的二进制字节流——将字节流的内容转存到方法区——在内存中生成一个Class对象作为该类方法区数据的访问入口
+
+验证阶段:
+当一个类被加载之后，必须要验证一下这个类是否合法，比如这个类是不是符合字节码的格式、变量与方法是不是有重复、数据类型是不是有效、继承与实现是否合乎标准等等。总之，这个阶段的目的就是保证加载的类是能够被jvm所运行
+
+准备：为类变量（静态变量）在方法区分配内存，并设置零值。注意：这里是类变量，不是实例变量，实例变量是对象分配到堆内存时根据运行时动态生成的
+
+解析:把常量池中的符号引用解析为直接引用：根据符号引用所作的描述，在内存中找到符合描述的目标并把目标指针指针返回
+
+初始化:类的初始化过程是这样的：按照顺序自上而下运行类中的变量赋值语句和静态语句，如果有父类，则首先按照顺序运行父类中的变量赋值语句和静态语句
+在类的初始化阶段，只会初始化与类相关的静态赋值语句和静态语句，也就是有static关键字修饰的信息，而没有static修饰的赋值语句和执行语句在实例化对象的时候才会运行
+
+卸载:在类使用完之后，如果满足下面的情况，类就会被卸载：
+该类所有的实例都已经被回收，也就是java堆中不存在该类的任何实例。
+加载该类的ClassLoader已经被回收,该类对应的java.lang.Class对象没有任何地方被引用，无法在任何地方通过反射访问该类的方法。
+如果以上三个条件全部满足，jvm就会在方法区垃圾回收的时候对类进行卸载，类的卸载过程其实就是在方法区中清空类信息，java类的整个生命周期就结束了。
+
+
+----- 消息中间件
+
+消息队列的优点:
+解耦：将系统按照不同的业务功能拆分出来，消息生产者只管把消息发布到MQ中而不用管谁来取，消息消费者只管从MQ中取消息而不管是谁发布的。消息生产者和消费者都不知道对方的存在；
+异步：主流程只需要完成业务的核心功能；对于业务非核心功能，将消息放入到消息队列之中进行异步处理，减少请求的等待，提高系统的总体性能；
+削峰/限流：将所有请求都写到消息队列中，消费服务器按照自身能够处理的请求数从队列中拿到请求，防止请求并发过高将系统搞崩溃；
+
+---- 消息队列的缺点:
+系统的可用性降低：系统引用的外部依赖越多，越容易挂掉，如果MQ 服务器挂掉，那么可能会导致整套系统崩溃。这时就要考虑如何保证消息队列的高可用了
+系统复杂度提高：加入消息队列之后，需要保证消息没有重复消费、如何处理消息丢失的情况、如何保证消息传递的有序性等问题；
+数据一致性问题：A 系统处理完了直接返回成功了，使用者都以为你这个请求就成功了；但是问题是，要是 BCD 三个系统那里，BD 两个系统写库成功了，结果 C 系统写库失败了，就会导致数据不一致了
+
+---- 组成
+生产者Publisher：生产消息，就是投递消息的一方。消息一般包含两个部分：消息体（payload）和标签（Label）
+消费者Consumer：消费消息，也就是接收消息的一方。消费者连接到RabbitMQ服务器，并订阅到队列上。消费消息时只消费消息体，丢弃标签。
+Broker服务节点：表示消息队列服务器实体。一般情况下一个Broker可以看做一个RabbitMQ服务器。
+Queue：消息队列，用来存放消息。一个消息可投入一个或多个队列，多个消费者可以订阅同一队列，这时队列中的消息会被平摊（轮询）给多个消费者进行处理。
+Exchange：交换器，接受生产者发送的消息，根据路由键将消息路由到绑定的队列上。
+Routing Key： 路由关键字，用于指定这个消息的路由规则，需要与交换器类型和绑定键(Binding Key)联合使用才能最终生效。
+Binding：绑定，通过绑定将交换器和队列关联起来，一般会指定一个BindingKey，通过BindingKey，交换器就知道将消息路由给哪个队列了。
+Connection ：网络连接，比如一个TCP连接，用于连接到具体broker
+Channel： 信道，AMQP 命令都是在信道中进行的，不管是发布消息、订阅队列还是接收消息，这些动作都是通过信道完成。因为建立和销毁TCP都是非常昂贵的开销，所以引入了信道的概念，以复用一条 TCP 连接，一个TCP连接可以用多个信道。客户端可以建立多个channel，每个channel表示一个会话任务。
+Message：消息，由消息头和消息体组成。消息体是不透明的，而消息头则由一系列的可选属性组成，这些属性包括routing-key（路由键）、priority（相对于其他消息的优先权）、delivery-mode（指出该消息可能需要持久性存储）等。
+Virtual host：虚拟主机，用于逻辑隔离，表示一批独立的交换器、消息队列和相关对象。一个Virtual host可以有若干个Exchange和Queue，同一个Virtual host不能有同名的Exchange或Queue。最重要的是，其拥有独立的权限系统，可以做到vhost范围的用户控制。当然，从RabbitMQ的全局角度，vhost可以作为不同权限隔离的手段
+
+Exchange交换器的类型：
+
+Exchange分发消息时根据类型的不同分发策略有区别，目前共四种类型：direct、fanout、topic、headers
+direct：消息中的路由键（RoutingKey）如果和 Bingding 中的 bindingKey 完全匹配，交换器就将消息发到对应的队列中。是基于完全匹配、单播的模式。
+fanout：把所有发送到fanout交换器的消息路由到所有绑定该交换器的队列中，fanout 类型转发消息是最快的。
+topic：通过模式匹配的方式对消息进行路由，将路由键和某个模式进行匹配，此时队列需要绑定到一个模式上。
+
+匹配规则：
+① RoutingKey 和 BindingKey 为一个 点号 '.' 分隔的字符串。 比如: java.xiaoka.show
+② BindingKey可使用 * 和 # 用于做模糊匹配：*匹配一个单词，#匹配多个或者0个单词
+headers：不依赖于路由键进行匹配，是根据发送消息内容中的headers属性进行匹配，除此之外 headers 交换器和 direct 交换器完全一致，但性能差很多，目前几乎用不到了
+
+----- 生产者消息的过程：
+Producer 先连接到 Broker，建立连接 Connection，开启一个信道 channel
+Producer 声明一个交换器并设置好相关属性
+Producer 声明一个队列并设置好相关属性
+Producer 通过绑定键将交换器和队列绑定起来
+Producer 发送消息到 Broker，其中包含路由键、交换器等信息
+交换器根据接收到的路由键查找匹配的队列
+如果找到，将消息存入对应的队列，如果没有找到，会根据生产者的配置丢弃或者退回给生产者。
+关闭信道
+
+消费者接收消息过程：
+Producer 先连接到 Broker，建立连接 Connection，开启一个信道 channel
+向 Broker 请求消费相应队列中消息，可能会设置响应的回调函数。
+等待 Broker 回应并投递相应队列中的消息，接收消息。
+消费者确认收到的消息，ack。
+RabbitMQ从队列中删除已经确定的消息。
+关闭信道
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
